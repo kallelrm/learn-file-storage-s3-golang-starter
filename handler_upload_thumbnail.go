@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -61,15 +65,22 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	thumb := thumbnail{
-		data:      data,
-		mediaType: mediaType,
+	fileExt := strings.Split(mediaType, "/")[1]
+	if mediaType != "image/jpg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "invalid file type", err)
+		return
 	}
 
-	videoThumbnails[videoID] = thumb
-	url := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID)
+	path := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", videoIDString, fileExt))
+	createdFile, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error writing thumbnail to disk", err)
+		return
+	}
+	io.Copy(createdFile, bytes.NewReader(data))
+
+	url := fmt.Sprintf("http://localhost:%s/%s", cfg.port, path)
 	metadata.ThumbnailURL = &url
-	fmt.Printf("HERE!!! %+v", metadata)
 
 	err = cfg.db.UpdateVideo(metadata)
 	if err != nil {
