@@ -131,6 +131,18 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusOK, metadata)
 }
 
+func processVideoForFastStart(filePath string) (string, error) {
+	outputhFilePath := fmt.Sprintf("%s.processing", filePath)
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4")
+	err := cmd.Run()
+	if err != nil {
+		log.Printf("Error processing video: %v\n", err)
+		return "", err
+	}
+
+	return outputhFilePath, nil
+}
+
 func getVideoAspectRatio(filePath string) (string, error) {
 	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
 	var out bytes.Buffer
