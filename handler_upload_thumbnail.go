@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,7 +73,9 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	path := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", videoIDString, fileExt))
+	key := make([]byte, 32)
+	rand.Read(key)
+	path := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(key), fileExt))
 	createdFile, err := os.Create(path)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error writing thumbnail to disk", err)
