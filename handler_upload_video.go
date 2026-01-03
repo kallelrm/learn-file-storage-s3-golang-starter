@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -16,6 +20,18 @@ import (
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+type FFProbeResult struct {
+	Streams []Stream `json:"streams"`
+}
+
+type Stream struct {
+	Index     int    `json:"index"`
+	CodecName string `json:"codec_name"`
+	CodecType string `json:"codec_type"`
+	Width     int    `json:"width,omitempty"`  // omitempty pois áudio não tem largura
+	Height    int    `json:"height,omitempty"` // omitempty pois áudio não tem altura
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	const maxMemory = 1 << 30
@@ -108,4 +124,29 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, metadata)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	err := cmd.Run()
+	if err != nil {
+		log.Printf("Error running ffmpeg: %v\n", err)
+		return "", err
+	}
+
+	var result FFProbeResult
+	err = json.Unmarshal(out.Bytes(), &result)
+	if err != nil {
+		log.Printf("Error unmarshaling video data: %v", err)
+		return "", err
+	}
+	width := result.Streams[0].Width
+	height := result.Streams[0].Height
+	ratioAux := float64(width / height)
+	fractionalPart := ratioAux - math.Floor(ratioAux)
+	shifted := fractionalPart * 10
+	firstDigit := int(shifted)
 }
