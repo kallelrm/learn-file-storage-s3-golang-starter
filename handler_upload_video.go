@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -88,18 +87,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	key := make([]byte, 32)
 	rand.Read(key)
 	filename := fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(key), fileExt)
-	path := filepath.Join(cfg.assetsRoot, filename)
+	// path := filepath.Join(cfg.assetsRoot, filename)
 	createdFile, err := os.CreateTemp("", "tubely-video-upload-*.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error writing video to disk.", err)
 		return
 	}
-	log.Printf("%+v, path: %+v", createdFile, path)
+	// log.Printf("%+v, path: %+v", createdFile, path)
 	_, err = io.Copy(createdFile, file)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error copying video to temp file", err)
 		return
 	}
+	aspectRatio, err := getVideoAspectRatio(createdFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error retrieving data from the video", err)
+		return
+	}
+	print(aspectRatio)
 
 	defer file.Close()
 	defer createdFile.Close()
@@ -111,12 +116,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
-		Key:         aws.String(filename),
+		Key:         aws.String(fmt.Sprintf("%s/%s", aspectRatio, filename)),
 		Body:        createdFile,
 		ContentType: aws.String("video/mp4"),
 	})
 
-	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, filename)
+	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/%s", cfg.s3Bucket, cfg.s3Region, aspectRatio, filename)
 	metadata.VideoURL = &s3VideoURL
 	err = cfg.db.UpdateVideo(metadata)
 	if err != nil {
@@ -156,14 +161,14 @@ func checkRatio(width, height int) string {
 	}
 
 	ratio := float64(width) / float64(height)
-	ratio16x9 := 16 / 9 // aprox 1.7777...
-	ratio9x16 := 9 / 16 // 0.5625
+	ratio16x9 := 16.0 / 9.0 // aprox 1.7777...
+	ratio9x16 := 9.0 / 16.0 // 0.5625
 	tolerance := 0.1
 	if math.Abs(ratio-float64(ratio16x9)) < tolerance {
-		return "16:9"
+		return "landscape"
 	}
 	if math.Abs(ratio-float64(ratio9x16)) < tolerance {
-		return "9:16"
+		return "portrait"
 	}
 	return "other"
 }
