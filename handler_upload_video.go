@@ -145,8 +145,25 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 	width := result.Streams[0].Width
 	height := result.Streams[0].Height
-	ratioAux := float64(width / height)
-	fractionalPart := ratioAux - math.Floor(ratioAux)
-	shifted := fractionalPart * 10
-	firstDigit := int(shifted)
+	ratio := checkRatio(width, height)
+
+	return ratio, nil
+}
+
+func checkRatio(width, height int) string {
+	if width == 0 || height == 0 {
+		return "cannot determine ratio with zero dimensions"
+	}
+
+	ratio := float64(width) / float64(height)
+	ratio16x9 := 16 / 9 // aprox 1.7777...
+	ratio9x16 := 9 / 16 // 0.5625
+	tolerance := 0.1
+	if math.Abs(ratio-float64(ratio16x9)) < tolerance {
+		return "16:9"
+	}
+	if math.Abs(ratio-float64(ratio9x16)) < tolerance {
+		return "9:16"
+	}
+	return "other"
 }
