@@ -104,20 +104,31 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Error retrieving data from the video", err)
 		return
 	}
-	print(aspectRatio)
 
+	processedPath, err := processVideoForFastStart(createdFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing the video", err)
+		return
+	}
+	processedFile, err := os.Open(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing the video", err)
+		return
+	}
 	defer file.Close()
 	defer createdFile.Close()
 	defer os.Remove(createdFile.Name())
+	defer processedFile.Close()
+	defer os.Remove(processedFile.Name())
 
 	// uploading video to s3
 
-	createdFile.Seek(0, io.SeekStart) // here go uses a syscall named seek in order to get the pointers of the file back to the beginning of it, so we can read the file again and upload it to the bucket
+	// createdFile.Seek(0, io.SeekStart) // here go uses a syscall named seek in order to get the pointers of the file back to the beginning of it, so we can read the file again and upload it to the bucket
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         aws.String(fmt.Sprintf("%s/%s", aspectRatio, filename)),
-		Body:        createdFile,
+		Body:        processedFile,
 		ContentType: aws.String("video/mp4"),
 	})
 
@@ -132,15 +143,15 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 }
 
 func processVideoForFastStart(filePath string) (string, error) {
-	outputhFilePath := fmt.Sprintf("%s.processing", filePath)
-	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4")
+	outputFilePath := fmt.Sprintf("%s.processing", filePath)
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilePath)
 	err := cmd.Run()
 	if err != nil {
 		log.Printf("Error processing video: %v\n", err)
 		return "", err
 	}
 
-	return outputhFilePath, nil
+	return outputFilePath, nil
 }
 
 func getVideoAspectRatio(filePath string) (string, error) {
