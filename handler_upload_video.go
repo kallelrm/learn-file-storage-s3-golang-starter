@@ -2,21 +2,24 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -33,9 +36,8 @@ type Stream struct {
 }
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
-	const maxMemory = 1 << 30
-	r.Body = http.MaxBytesReader(w, r.Body, maxMemory)
-	log.Printf("TESTE do reader: %+v\n", r.Body)
+	const uploadLimit = 1 << 30
+	r.Body = http.MaxBytesReader(w, r.Body, uploadLimit)
 
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
@@ -56,90 +58,110 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	log.Print(videoID, userID)
-
-	// retrieving metadata
-	metadata, err := cfg.db.GetVideo(videoID)
+	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to retrieve video", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't find video", err)
 		return
 	}
-	if metadata.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "User is not the owner of the vider", err)
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Not authorized to update this video", nil)
 		return
 	}
 
-	// parsing the video from the request
-	file, header, err := r.FormFile("video")
+	file, handler, err := r.FormFile("video")
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Unable to parse from file", err)
-		return
-	}
-
-	mediaType := header.Header.Get("Content-Type")
-
-	fileExt := strings.Split(mediaType, "/")[1]
-	if mediaType != "video/mp4" {
-		respondWithError(w, http.StatusBadRequest, "invalid file type", err)
-		return
-	}
-
-	key := make([]byte, 32)
-	rand.Read(key)
-	filename := fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(key), fileExt)
-	// path := filepath.Join(cfg.assetsRoot, filename)
-	createdFile, err := os.CreateTemp("", "tubely-video-upload-*.mp4")
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error writing video to disk.", err)
-		return
-	}
-	// log.Printf("%+v, path: %+v", createdFile, path)
-	_, err = io.Copy(createdFile, file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error copying video to temp file", err)
-		return
-	}
-	aspectRatio, err := getVideoAspectRatio(createdFile.Name())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error retrieving data from the video", err)
-		return
-	}
-
-	processedPath, err := processVideoForFastStart(createdFile.Name())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error processing the video", err)
-		return
-	}
-	processedFile, err := os.Open(processedPath)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error processing the video", err)
+		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
 		return
 	}
 	defer file.Close()
-	defer createdFile.Close()
-	defer os.Remove(createdFile.Name())
-	defer processedFile.Close()
-	defer os.Remove(processedFile.Name())
 
-	// uploading video to s3
-
-	// createdFile.Seek(0, io.SeekStart) // here go uses a syscall named seek in order to get the pointers of the file back to the beginning of it, so we can read the file again and upload it to the bucket
-
-	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
-		Bucket:      &cfg.s3Bucket,
-		Key:         aws.String(fmt.Sprintf("%s/%s", aspectRatio, filename)),
-		Body:        processedFile,
-		ContentType: aws.String("video/mp4"),
-	})
-
-	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/%s", cfg.s3Bucket, cfg.s3Region, aspectRatio, filename)
-	metadata.VideoURL = &s3VideoURL
-	err = cfg.db.UpdateVideo(metadata)
+	mediaType, _, err := mime.ParseMediaType(handler.Header.Get("Content-Type"))
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to upload video", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
 		return
 	}
-	respondWithJSON(w, http.StatusOK, metadata)
+	if mediaType != "video/mp4" {
+		respondWithError(w, http.StatusBadRequest, "Invalid file type, only MP4 is allowed", nil)
+		return
+	}
+
+	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create temp file", err)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	if _, err := io.Copy(tempFile, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not write file to disk", err)
+		return
+	}
+
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not reset file pointer", err)
+		return
+	}
+
+	directory := ""
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error determining aspect ratio", err)
+		return
+	}
+	switch aspectRatio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	default:
+		directory = "other"
+	}
+
+	key := getAssetPath(mediaType)
+	key = path.Join(directory, key)
+
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not open processed file", err)
+		return
+	}
+	defer processedFile.Close()
+
+	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
+		Bucket:      aws.String(cfg.s3Bucket),
+		Key:         aws.String(key),
+		Body:        processedFile,
+		ContentType: aws.String(mediaType),
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error uploading file to S3", err)
+		return
+	}
+
+	url := fmt.Sprintf("%s,%s", cfg.s3Bucket, key)
+	video.VideoURL = &url
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+
+	video, err = cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate presigned URL", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
 
 func processVideoForFastStart(filePath string) (string, error) {
@@ -194,4 +216,35 @@ func checkRatio(width, height int) string {
 		return "portrait"
 	}
 	return "other"
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	presignClient := s3.NewPresignClient(s3Client)
+	presignUrl, err := presignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate presigned URL: %v", err)
+	}
+	return presignUrl.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	if video.VideoURL == nil {
+		return video, nil
+	}
+	parts := strings.Split(*video.VideoURL, ",")
+	if len(parts) < 2 {
+		return video, nil
+	}
+
+	bucket := parts[0]
+	key := parts[1]
+	presigned, err := generatePresignedURL(cfg.s3Client, bucket, key, 5*time.Minute)
+	if err != nil {
+		return video, err
+	}
+	video.VideoURL = &presigned
+	return video, nil
 }
